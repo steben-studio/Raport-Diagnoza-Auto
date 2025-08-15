@@ -1,18 +1,16 @@
 {
-  "name": "raport-auto",
+  "name": "raport-diagnoza",
   "version": "1.0.0",
-  "main": "index.js",
   "type": "module",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "cheerio": "^1.0.0",
-    "dotenv": "^16.0.0",
-    "imap-simple": "^5.1.0",
-    "nodemailer": "^6.9.3",
-    "openai": "^4.0.0",
-    "puppeteer": "^22.0.0",
-    "node-fetch": "^3.3.2"
+    "dotenv": "^16.4.5",
+    "imapflow": "^1.0.164",
+    "mailparser": "^3.6.8",
+    "node-fetch": "^3.3.2",
+    "nodemailer": "^6.9.14",
+    "openai": "^4.55.0",
+    "puppeteer": "^23.3.0"
   }
 }
