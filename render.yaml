@@ -12,6 +12,8 @@ services:
         sync: false
       - key: IMAP_PORT
         sync: false
+      - key: IMAP_SECURE
+        sync: false
       - key: IMAP_USER
         sync: false
       - key: IMAP_PASS
