@@ -19,9 +19,10 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const imap = new ImapFlow({
   host: process.env.IMAP_HOST,
-  port: Number(process.env.IMAP_PORT),
-  secure: true,
-  auth: { user: process.env.IMAP_USER, pass: process.env.IMAP_PASS }
+  port: Number(process.env.IMAP_PORT || 993),
+  secure: String(process.env.IMAP_SECURE ?? 'true').toLowerCase() !== 'false',
+  auth: { user: process.env.IMAP_USER, pass: process.env.IMAP_PASS },
+  logger: false
 });
 
 async function main() {
