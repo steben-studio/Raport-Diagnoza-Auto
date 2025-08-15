@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import fetch from 'node-fetch';
-import cheerio from 'cheerio';
+import { load } from 'cheerio';
 import fs from 'fs/promises';
 import path from 'path';
 import nodemailer from 'nodemailer';
@@ -77,7 +77,7 @@ async function fetchTopdonReport(url) {
   const res = await fetch(url, { redirect:'follow' });
   if (!res.ok) return null;
   const html = await res.text();
-  const $ = cheerio.load(html);
+  const $ = load(html);
 
   // HEADERS: Time/SN/Make/Model/VIN/Mileage – apar în pagina (vezi exemplul din linkul tau) :contentReference[oaicite:1]{index=1}
   const text = $('body').text().replace(/\s+/g,' ').trim();
