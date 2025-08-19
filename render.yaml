@@ -1,19 +1,21 @@
 services:
-  - type: worker
-    name: topdon-raport
+  - type: web
+    name: raport-diagnoza-auto
     env: node
     autoDeploy: true
 
-    # Build & start
     buildCommand: yarn
     startCommand: node index.js
 
-    # (optional) fixează versiunea Node dacă vrei stabilitate
+    # Render va verifica acest endpoint ca sa considere serviciul "up"
+    healthCheckPath: /health
+    healthCheckTimeout: 100
+
     envVars:
       - key: NODE_VERSION
         value: 22.16.0
 
-      # --- IMAP (Gmail) ---
+      # --- IMAP (Gmail)
       - key: IMAP_HOST
         value: imap.gmail.com
       - key: IMAP_PORT
@@ -21,19 +23,19 @@ services:
       - key: IMAP_SECURE
         value: "true"
       - key: IMAP_USER
-        sync: false         # setezi in Render Dashboard
+        sync: false
       - key: IMAP_PASS
-        sync: false         # App Password de 16 caractere
+        sync: false
 
-      # --- Căutare & polling ---
+      # --- Polling
       - key: MAILBOX
         value: INBOX
       - key: SEARCH_QUERY
-        value: 'UNSEEN'
+        value: "UNSEEN"
       - key: POLL_INTERVAL_MS
-        value: "120000"     # 120s
+        value: "120000"
 
-      # --- PDF / Template ---
+      # --- PDF / Template
       - key: REPORT_TEMPLATE
         value: vw_cv_2016
       - key: REMOVE_DIACRITICS
@@ -41,7 +43,7 @@ services:
       - key: SITE_LOCALE
         value: ro-RO
 
-      # --- SMTP (trimitere raport pe email) ---
+      # --- SMTP (trimitere raport pe email - optional)
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT
@@ -49,15 +51,15 @@ services:
       - key: SMTP_SECURE
         value: "true"
       - key: SMTP_USER
-        sync: false         # adresa ta Gmail
+        sync: false
       - key: SMTP_PASS
-        sync: false         # App Password (poate fi același)
+        sync: false
 
-      # --- OpenAI (dacă folosești sumarizare/explicații) ---
+      # --- OpenAI (daca folosesti sumarizare/explicatii)
       - key: OPENAI_API_KEY
         sync: false
 
-      # --- Upload extern (opțional: S3 / Cloudflare R2) ---
+      # --- Upload extern (optional: S3 / R2)
       - key: STORAGE_PROVIDER
         value: s3
       - key: S3_ENDPOINT
@@ -71,8 +73,4 @@ services:
       - key: S3_SECRET_ACCESS_KEY
         sync: false
       - key: S3_PUBLIC_BASE
-        sync: false         # URL-ul public/CDN pt. linkul final
-
-      # --- Notificări Slack (opțional) ---
-      - key: SLACK_WEBHOOK_URL
         sync: false
