@@ -17,6 +17,15 @@ const POLL_MS = Math.max(60, Number(process.env.POLL_SECONDS) || 120) * 1000;
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// fallback defaults (dacă ENV nu e setat corect pe Render)
+const IMAPHOST = process.env.IMAP_HOST || 'imap.gmail.com';
+const IMAPPORT = Number(process.env.IMAP_PORT || 993);
+const IMAPSEC  = String(process.env.IMAP_SECURE ?? 'true').toLowerCase() !== 'false';
+
+const SMTPHOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+const SMTPPORT = Number(process.env.SMTP_PORT || 465);
+const SMTPSEC  = String(process.env.SMTP_SECURE ?? 'true').toLowerCase() !== 'false';
+
 const imap = new ImapFlow({
   host: process.env.IMAP_HOST,
   port: Number(process.env.IMAP_PORT || 993),
