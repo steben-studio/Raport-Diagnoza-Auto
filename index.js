@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import http from 'http';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import fetch from 'node-fetch';
@@ -13,11 +14,18 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
+// --- HTTP health endpoint pentru Render (obligatoriu la Web Service)
+const PORT = process.env.PORT || 10000;
+http.createServer((req, res) => {
+  if (req.url === '/health') { res.writeHead(200); res.end('ok'); return; }
+  res.writeHead(200); res.end('running');
+}).listen(PORT, () => console.log('HTTP health on', PORT));
+
 const POLL_MS = Math.max(60, Number(process.env.POLL_SECONDS) || 120) * 1000;
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// fallback defaults (dacă ENV nu e setat corect pe Render)
+// fallback defaults (daca ENV nu e setat corect pe Render)
 const IMAPHOST = process.env.IMAP_HOST || 'imap.gmail.com';
 const IMAPPORT = Number(process.env.IMAP_PORT || 993);
 const IMAPSEC  = String(process.env.IMAP_SECURE ?? 'true').toLowerCase() !== 'false';
@@ -26,24 +34,26 @@ const SMTPHOST = process.env.SMTP_HOST || 'smtp.gmail.com';
 const SMTPPORT = Number(process.env.SMTP_PORT || 465);
 const SMTPSEC  = String(process.env.SMTP_SECURE ?? 'true').toLowerCase() !== 'false';
 
+const MAILBOX  = process.env.MAILBOX || 'INBOX';
+
 const imap = new ImapFlow({
-  host: process.env.IMAP_HOST,
-  port: Number(process.env.IMAP_PORT || 993),
-  secure: String(process.env.IMAP_SECURE ?? 'true').toLowerCase() !== 'false',
+  host: IMAPHOST,
+  port: IMAPPORT,
+  secure: IMAPSEC,
   auth: { user: process.env.IMAP_USER, pass: process.env.IMAP_PASS },
   logger: false
 });
 
 async function main() {
   await imap.connect();
-  await imap.mailboxOpen('INBOX');
+  await imap.mailboxOpen(MAILBOX);
   console.log('IMAP conectat; polling la', POLL_MS/1000, 'sec');
   await checkInbox();
   setInterval(checkInbox, POLL_MS);
 }
 
 async function checkInbox() {
-  const lock = await imap.getMailboxLock('INBOX');
+  const lock = await imap.getMailboxLock(MAILBOX);
   try {
     // ultimele necitite, doar de la TOPDON
     for await (const msg of imap.fetch({ seen: false }, { uid: true, source: true })) {
@@ -52,7 +62,9 @@ async function checkInbox() {
       const subj = (mail.subject||'').toLowerCase();
 
       if (!from.includes('report-noreply@topdondiagnostics.com') &&
-          !subj.includes('raport de diagnosticare')) continue;
+          !subj.includes('raport de diagnosticare')) {
+        continue;
+      }
 
       const body = (mail.html || mail.text || '');
       const link = extractTopdonLink(body);
@@ -75,6 +87,8 @@ async function checkInbox() {
 
       await imap.messageFlagsAdd({uid:msg.uid}, ['\\Seen']);
     }
+  } catch (e) {
+    console.error('Eroare la checkInbox:', e);
   } finally { lock.release(); }
 }
 
@@ -89,7 +103,7 @@ async function fetchTopdonReport(url) {
   const html = await res.text();
   const $ = load(html);
 
-  // HEADERS: Time/SN/Make/Model/VIN/Mileage – apar în pagina (vezi exemplul din linkul tau) :contentReference[oaicite:1]{index=1}
+  // text brut din pagina
   const text = $('body').text().replace(/\s+/g,' ').trim();
 
   const get = (re) => (text.match(re)||[])[1] || null;
@@ -100,11 +114,8 @@ async function fetchTopdonReport(url) {
   const vin     = get(/VIN:\s*([A-HJ-NPR-Z0-9]{17})/i);
   const mileage = get(/Mileage:\s*([0-9.,]+\s*km)/i);
 
-  // DTC: pattern repetitiv: <MODULE> <CODE> <DESCRIPTION> <STATUS>
-  // ex din pagină: INJECȚIE 012029 CIRCUIT ... , ...  Memorie   :contentReference[oaicite:2]{index=2}
-  // Facem un parser robust pe grupuri:
   const dtcs = [];
-  const blocks = text.split(/(?= [A-ZĂÂÎȘȚ]{3,}\s+[0-9A-F]{4,6}\s+)/g); // separă la "MODUL COD"
+  const blocks = text.split(/(?= [A-ZĂÂÎȘȚ]{3,}\s+[0-9A-F]{4,6}\s+)/g);
   for (const b of blocks) {
     const m1 = b.match(/([A-ZĂÂÎȘȚ]{3,})\s+([0-9A-F]{4,6})\s+([^]+?)(Memorie|Permanent|Intermitent|Fără\s*status)/i);
     if (!m1) continue;
@@ -120,7 +131,6 @@ async function fetchTopdonReport(url) {
 }
 
 async function analyzeWithGPT(report) {
-  // Pregatim inputul pentru LLM (fara diagritice in output)
   const sys = `Esti un mecanic auto senior. Raspunzi EXCLUSIV in JSON strict, fara diacritice.
 Campuri obligatorii: 
 {
@@ -149,12 +159,10 @@ Reguli: 2-4 propozitii per camp de text; nu inventa date lipsa; pastreaza concis
     temperature: 0.2
   });
 
-  // fortam JSON
   let data;
   try { data = JSON.parse(resp.choices[0].message.content); }
   catch { throw new Error("LLM a returnat non-JSON"); }
 
-  // pliem fallback-uri
   data.vehicul = data.vehicul || {};
   data.vehicul.brand = data.vehicul.brand || report.make || null;
   data.vehicul.model = data.vehicul.model || report.model || null;
@@ -187,7 +195,6 @@ async function renderReport(report, data) {
              .replace('{{descriere}}', safe(r.descriere))
              .replace('{{cauza_posibila}}', safe(r.cauza_posibila))
              .replace('{{recomandare}}', safe(r.recomandare));
-    // marker pt. a scoate separatorul final
     if (i === arr.length - 1) row += '\n<!--__LASTROW__-->';
     return row;
   }), 'rows_pas1');
@@ -199,14 +206,12 @@ async function renderReport(report, data) {
       .replace('{{text}}', safe(r.text));
   }), 'rows_todo');
 
-  // reinsereaza in <tbody>-uri sabloanele expandate
-  html = html.replace('<!--__LASTROW__-->\n<tr class="row-sep"><td colspan="4"></td></tr>', ''); // scoate separatorul ultim
+  html = html.replace('<!--__LASTROW__-->\n<tr class="row-sep"><td colspan="4"></td></tr>', '');
   const outDir = path.join(__dirname, 'out');
   await fs.mkdir(outDir, { recursive: true });
   const outHtml = path.join(outDir, `Raport_${safe(report.vin)||'FARA_VIN'}.html`);
   await fs.writeFile(outHtml, html, 'utf8');
 
-  // PDF (cu assets/ locale)
   const browser = await puppeteer.launch({ args: ['--no-sandbox'] });
   const page = await browser.newPage();
   await page.goto('file://' + outHtml, { waitUntil: 'networkidle0' });
@@ -224,10 +229,8 @@ function fillLoop(html, token, rows, tbodyId) {
   const [full, start, block, end] = m;
   const inner = block.replace(/^[\\s\\S]*BEGIN:[^>]*-->([\\s\\S]*?)<!--\\s*END:[^>]*$/,'$1');
   const rendered = rows.map(val => {
-    // reconstruct randul + separatorul din template
     const parts = val.split('|');
     let row = inner;
-    // mapare pentru PAS1 (4 campuri) sau TODO (2 campuri)
     if (parts.length === 4) {
       row = row.replace('{{cod}}', parts[0])
                .replace('{{descriere}}', parts[1])
@@ -247,9 +250,9 @@ function safe(v){ return (v ?? '').toString(); }
 // TRIMITERE EMAIL
 async function emailReport(files) {
   const t = nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT),
-    secure: true,
+    host: SMTPHOST,
+    port: SMTPPORT,
+    secure: SMTPSEC,
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
   });
 
