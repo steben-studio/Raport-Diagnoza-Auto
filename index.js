@@ -151,13 +151,13 @@ Reguli: 2-4 propozitii per camp de text; nu inventa date lipsa; pastreaza concis
   };
 
   const resp = await openai.chat.completions.create({
-    model: "gpt-4o",
-    messages: [
-      { role:"system", content: sys },
-      { role:"user", content: JSON.stringify(user) }
-    ],
-    temperature: 0.2
-  });
+  model: "gpt-5",        // <- in loc de "gpt-4o"
+  messages: [
+    { role:"system", content: sys },
+    { role:"user", content: JSON.stringify(user) }
+  ],
+  temperature: 0.2
+});
 
   let data;
   try { data = JSON.parse(resp.choices[0].message.content); }
