@@ -7,7 +7,6 @@ import { load } from 'cheerio';
 import fs from 'fs/promises';
 import path from 'path';
 import nodemailer from 'nodemailer';
-import puppeteer from 'puppeteer';
 import OpenAI from 'openai';
 import { fileURLToPath } from 'url';
 
@@ -16,7 +15,7 @@ const __dirname  = path.dirname(__filename);
 
 // --- HTTP health endpoint pentru Render (obligatoriu la Web Service)
 const PORT = process.env.PORT || 10000;
-http.createServer((req, res) => {
+http.createServer(async (req, res) => {
   if (req.url === '/health') { res.writeHead(200); res.end('ok'); return; }
   res.writeHead(200); res.end('running');
 }).listen(PORT, () => console.log('HTTP health on', PORT));
@@ -130,18 +129,17 @@ async function fetchTopdonReport(url) {
   const make    = get(/Make:\s*([A-Za-z0-9]+)/i);
   const model   = get(/Model:\s*([A-Za-z0-9\/\-\s]+)/i);
   const vin     = get(/VIN:\s*([A-HJ-NPR-Z0-9]{17})/i);
-  const mileage = get(/Mileage:\s*([0-9.,]+\s*km)/i);
+  const mileage = get(/Mileage:\s*([0-9.,]+\s*(?:km|mi))/i);
 
   const dtcs = [];
-  const blocks = text.split(/(?= [A-ZĂÂÎȘȚ]{3,}\s+[0-9A-F]{4,6}\s+)/g);
+  const blocks = text.split(/(?=\s+[A-ZĂÂÎȘȚ]{3,}\s+[0-9A-F]{4,6}\s+)/g);
   for (const b of blocks) {
-    const m1 = b.match(/([A-ZĂÂÎȘȚ]{3,})\s+([0-9A-F]{4,6})\s+([^]+?)(Memorie|Permanent|Intermitent|Fără\s*status)/i);
+    const m1 = b.match(/([A-ZĂÂÎȘȚ]{3,})\s+([0-9A-F]{4,6})\s+([^]+?)(Memorie|Permanent|Intermitent|F[aă]r[aă]\s*status)/i);
     if (!m1) continue;
     const modul = m1[1].normalize("NFC");
     const cod   = m1[2];
     const descr = m1[3].replace(/\s+/g,' ').replace(/\s*,\s*/g, ', ').trim();
     const status= m1[4];
-
     dtcs.push({ modul, cod, descriere_bruta: descr, status });
   }
 
@@ -165,16 +163,16 @@ Reguli: 2-4 propozitii per camp de text; nu inventa date lipsa; pastreaza concis
       vin: report.vin, brand: report.make, model: report.model,
       kilometraj: report.mileage, data_scanarii: new Date().toISOString().slice(0,10)
     },
-    dtc_list: report.dtcs.map(d => ({ cod: d.cod, modul: d.modul, descriere_bruta: d.descr }))
+    dtc_list: report.dtcs.map(d => ({ cod: d.cod, modul: d.modul, descriere_bruta: d.descriere_bruta }))
   };
 
   const resp = await openai.chat.completions.create({
-  model: "gpt-5",        // <- in loc de "gpt-4o"
-  messages: [
-    { role:"system", content: sys },
-    { role:"user", content: JSON.stringify(user) }
-  ],
-});
+    model: "gpt-5",
+    messages: [
+      { role:"system", content: sys },
+      { role:"user", content: JSON.stringify(user) }
+    ],
+  });
 
   let data;
   try { data = JSON.parse(resp.choices[0].message.content); }
@@ -223,23 +221,15 @@ async function renderReport(report, data) {
       .replace('{{text}}', safe(r.text));
   }), 'rows_todo');
 
+  // scoate separatorul suplimentar de la ultima linie
   html = html.replace('<!--__LASTROW__-->\n<tr class="row-sep"><td colspan="4"></td></tr>', '');
+
   const outDir = path.join(__dirname, 'out');
   await fs.mkdir(outDir, { recursive: true });
   const outHtml = path.join(outDir, `Raport_${safe(report.vin)||'FARA_VIN'}.html`);
   await fs.writeFile(outHtml, html, 'utf8');
 
-  const browser = await puppeteer.launch({
-  executablePath: puppeteer.executablePath(),  // folosește Chrome instalat de Puppeteer
-  args: ['--no-sandbox', '--disable-setuid-sandbox']
-});
-  const page = await browser.newPage();
-  await page.goto('file://' + outHtml, { waitUntil: 'networkidle0' });
-  const outPdf = outHtml.replace(/\.html?$/i, '.pdf');
-  await page.pdf({ path: outPdf, printBackground: true });
-  await browser.close();
-
-  return { outHtml, outPdf };
+  return { outHtml, htmlString: html };
 }
 
 function fillLoop(html, token, rows, tbodyId) {
@@ -267,8 +257,10 @@ function fillLoop(html, token, rows, tbodyId) {
 
 function safe(v){ return (v ?? '').toString(); }
 
-// TRIMITERE EMAIL
+// TRIMITERE EMAIL (NUMAI HTML)
 async function emailReport(files) {
+  const htmlContent = await fs.readFile(files.outHtml, 'utf8');
+
   const t = nodemailer.createTransport({
     host: SMTPHOST,
     port: SMTPPORT,
@@ -279,14 +271,14 @@ async function emailReport(files) {
   await t.sendMail({
     from: process.env.SMTP_USER,
     to: process.env.SMTP_USER,
-    subject: `Raport Diagnoza Auto`,
-    text: `Gasesti atasat raportul generat.`,
+    subject: `Raport Diagnoza Auto (HTML)`,
+    text: `Gasesti atasat raportul generat in format HTML. Poti deschide fisierul cu orice browser.`,
+    html: htmlContent, // trimite HTML inline in corpul mailului
     attachments: [
-      { filename: path.basename(files.outPdf), path: files.outPdf },
       { filename: path.basename(files.outHtml), path: files.outHtml }
     ]
   });
-  console.log('✅ Email trimis cu raportul:', files.outPdf);
+  console.log('✅ Email trimis cu raportul HTML:', files.outHtml);
 }
 
 main().catch(e => { console.error(e); process.exitCode = 1; });
