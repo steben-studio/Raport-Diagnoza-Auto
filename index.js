@@ -211,7 +211,10 @@ async function renderReport(report, data) {
   const outHtml = path.join(outDir, `Raport_${safe(report.vin)||'FARA_VIN'}.html`);
   await fs.writeFile(outHtml, html, 'utf8');
 
-  const browser = await puppeteer.launch({ args: ['--no-sandbox'] });
+  const browser = await puppeteer.launch({
+    executablePath: puppeteer.executablePath(),  // folosește Chrome inclus în pachet
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
   const page = await browser.newPage();
   await page.goto('file://' + outHtml, { waitUntil: 'networkidle0' });
   const outPdf = outHtml.replace(/\.html?$/i, '.pdf');
