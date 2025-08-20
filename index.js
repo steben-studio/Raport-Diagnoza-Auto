@@ -156,7 +156,6 @@ Reguli: 2-4 propozitii per camp de text; nu inventa date lipsa; pastreaza concis
     { role:"system", content: sys },
     { role:"user", content: JSON.stringify(user) }
   ],
-  temperature: 0.2
 });
 
   let data;
