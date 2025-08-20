@@ -2,7 +2,10 @@
   "name": "raport-diagnoza",
   "version": "1.0.0",
   "type": "module",
-  "scripts": { "start": "node index.js" },
+  "scripts": {
+    "start": "node index.js",
+    "postinstall": "npx puppeteer browsers install chrome"
+  },
   "dependencies": {
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.5",
@@ -12,5 +15,8 @@
     "nodemailer": "^6.9.14",
     "openai": "^4.55.0",
     "puppeteer": "^23.3.0"
+  },
+  "engines": {
+    "node": ">=18 <23"
   }
 }
