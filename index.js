@@ -44,6 +44,24 @@ const imap = new ImapFlow({
   logger: false
 });
 
+// --- harden IMAP: log + auto-reconnect pe inchidere
+imap.on('error', (err) => {
+  console.error('IMAP error:', err);
+});
+
+imap.on('close', async () => {
+  console.warn('IMAP connection closed. Reconnecting in 5s...');
+  setTimeout(async () => {
+    try {
+      await imap.connect();
+      await imap.mailboxOpen(MAILBOX);
+      console.log('IMAP reconnected');
+    } catch (e) {
+      console.error('Reconnect failed:', e);
+    }
+  }, 5000);
+});
+
 async function main() {
   await imap.connect();
   await imap.mailboxOpen(MAILBOX);
