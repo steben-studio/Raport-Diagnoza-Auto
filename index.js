@@ -212,9 +212,9 @@ async function renderReport(report, data) {
   await fs.writeFile(outHtml, html, 'utf8');
 
   const browser = await puppeteer.launch({
-    executablePath: puppeteer.executablePath(),  // folosește Chrome inclus în pachet
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  });
+  executablePath: puppeteer.executablePath(),  // folosește Chrome instalat de Puppeteer
+  args: ['--no-sandbox', '--disable-setuid-sandbox']
+});
   const page = await browser.newPage();
   await page.goto('file://' + outHtml, { waitUntil: 'networkidle0' });
   const outPdf = outHtml.replace(/\.html?$/i, '.pdf');
