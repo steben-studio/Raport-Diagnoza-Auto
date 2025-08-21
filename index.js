@@ -185,17 +185,18 @@ async function fetchTopdonReport(url) {
 
 /* -------------------- GPT analiza → JSON fara diacritice -------------------- */
 async function analyzeWithGPT(report) {
-  const sys = `Esti un mecanic auto senior. Raspunzi EXCLUSIV in JSON strict, fara diacritice.
-Campuri obligatorii:
+  const sys = `Esti un mecanic auto senior. Raspunzi EXCLUSIV cu un SINGUR obiect JSON, fara diacritice.
+NU adauga explicatii, markdown sau text in afara JSON.
+Schema:
 {
- "vehicul":{"brand":"...","model":"...","an":null|"....","motorizare":null|"....","kilometraj":"...","data_scanarii":"YYYY-MM-DD"},
- "pas_1_erori_initiale":[{"cod":"...","descriere":"...","cauza_posibila":"...","recomandare":"..."}],
- "concluzie":"...",
- "todo":[{"nr":"1","text":"..."}]
+  "vehicul":{"brand":"...","model":"...","an":null|"....","motorizare":null|"....","kilometraj":"...","data_scanarii":"YYYY-MM-DD"},
+  "pas_1_erori_initiale":[{"cod":"...","descriere":"...","cauza_posibila":"...","recomandare":"..."}],
+  "concluzie":"...",
+  "todo":[{"nr":"1","text":"..."}]
 }
-Reguli: 2-4 propozitii per camp; nu inventa date lipsa; concis si practic; fara diacritice.`;
+Reguli: 2-4 propozitii la fiecare camp text; concis si practic; fara diacritice; nu inventa date lipsa.`;
 
-  const user = {
+  const userPayload = {
     instr: "Analizeaza raportul TOPDON: pentru fiecare DTC da Descriere, Cauza posibila, Recomandare. La final Concluzie si lista 'Ce trebuie facut acum'.",
     meta: {
       vin: report.vin, brand: report.make, model: report.model,
@@ -204,36 +205,86 @@ Reguli: 2-4 propozitii per camp; nu inventa date lipsa; concis si practic; fara 
     dtc_list: report.dtcs.map(d => ({ cod: d.cod, modul: d.modul, descriere_bruta: d.descriere_bruta }))
   };
 
-  const resp = await openai.chat.completions.create({
+  // 1) cerem explicit JSON mode
+  const req = {
     model: 'gpt-5',
     messages: [
       { role: 'system', content: sys },
-      { role: 'user', content: JSON.stringify(user) }
+      { role: 'user', content: JSON.stringify(userPayload) }
     ],
-  });
+    temperature: 0.2,
+    // JSON Mode – raspuns valid JSON, fara text adiacent
+    response_format: { type: 'json_object' }
+  };
 
-  let data;
-  try { data = JSON.parse(resp.choices[0].message.content); }
-  catch { throw new Error('LLM a returnat non-JSON'); }
+  // 2) retry + cleanup daca tot vine non-JSON (de ex. modele fara JSON mode)
+  let raw;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const resp = await openai.chat.completions.create(req);
+    raw = resp.choices?.[0]?.message?.content || '';
+    try {
+      const data = parseLLMJson(raw);
+      // completam meta lipsa
+      data.vehicul = data.vehicul || {};
+      data.vehicul.brand = data.vehicul.brand || report.make || null;
+      data.vehicul.model = data.vehicul.model || report.model || null;
+      data.vehicul.kilometraj = data.vehicul.kilometraj || report.mileage || null;
+      data.vehicul.data_scanarii = data.vehicul.data_scanarii || new Date().toISOString().slice(0,10);
 
-  // completeaza meta lipsa + fallback daca nu exista DTC
-  data.vehicul = data.vehicul || {};
-  data.vehicul.brand = data.vehicul.brand || report.make || null;
-  data.vehicul.model = data.vehicul.model || report.model || null;
-  data.vehicul.kilometraj = data.vehicul.kilometraj || report.mileage || null;
-  data.vehicul.data_scanarii = data.vehicul.data_scanarii || new Date().toISOString().slice(0,10);
-
-  if (!data.pas_1_erori_initiale || data.pas_1_erori_initiale.length === 0) {
-    data.concluzie = data.concluzie || 'Raportul TOPDON nu a furnizat DTC-uri detaliate. Recomand rescanare completa cu tensiune stabila si export complet cu freeze frame.';
-    data.todo = data.todo?.length ? data.todo : [
-      { nr: '1', text: 'Fa un Auto-Scan pe toate modulele cu redresor 12–14.5V.' },
-      { nr: '2', text: 'Daca apar coduri, exporta raportul detaliat cu ECU, cod, descriere si freeze frame.' },
-      { nr: '3', text: 'Daca nu apar DTC, verifica alimentarea OBD-II si liniile CAN/K-Line.' }
-    ];
+      if (!data.pas_1_erori_initiale || data.pas_1_erori_initiale.length === 0) {
+        data.concluzie = data.concluzie || 'Raportul TOPDON nu a furnizat DTC-uri detaliate. Recomand rescanare completa cu tensiune stabila si export complet cu freeze frame.';
+        data.todo = data.todo?.length ? data.todo : [
+          { nr: '1', text: 'Efectueaza un Auto-Scan complet pe toate modulele cu redresor conectat (12–14.5V).' },
+          { nr: '2', text: 'Daca apar coduri, exporta raportul detaliat cu denumirea ECU, cod, descriere si freeze frame.' },
+          { nr: '3', text: 'Daca nu apar coduri, verifica alimentarea OBD-II si liniile CAN/K-Line.' }
+        ];
+      }
+      return data;
+    } catch (e) {
+      console.warn(`[llm] JSON parse fail (attempt ${attempt}) – len=${raw.length}`);
+      // la al doilea esec, continuam la fallback
+    }
   }
 
-  return data;
+  // 3) Fallback garantat (nu blocam pipeline-ul)
+  const minimal = {
+    vehicul: {
+      brand: report.make || null,
+      model: report.model || null,
+      an: null,
+      motorizare: null,
+      kilometraj: report.mileage || null,
+      data_scanarii: new Date().toISOString().slice(0,10)
+    },
+    pas_1_erori_initiale: (report.dtcs || []).map(d => ({
+      cod: d.cod || '',
+      descriere: d.descriere_bruta || 'Descriere indisponibila',
+      cauza_posibila: 'Verificare suplimentara necesara pe baza datelor de freeze frame si a testelor de rutina.',
+      recomandare: 'Efectueaza diagnostic tinta pe modulul indicat; verifica alimentare, mase, conectori, senzori/actuatori si actualizari software.'
+    })),
+    concluzie: 'Raspunsul modelului nu a putut fi validat ca JSON. Am generat un raport minimal pe baza DTC-urilor brute.',
+    todo: [
+      { nr: '1', text: 'Rescaneaza si exporta raportul complet (cu freeze frame) pentru acuratete crescuta.' },
+      { nr: '2', text: 'Ruleaza verificari electrice de baza (baterie, alternator, mase, conectori).' },
+      { nr: '3', text: 'Efectueaza test drive si monitorizeaza parametrii relevanti; confirma simptomele.' }
+    ]
+  };
+  return minimal;
 }
+
+/* Helper: curata si parseaza JSON "murdar" din LLM */
+function parseLLMJson(raw) {
+  if (typeof raw !== 'string') throw new Error('no content');
+  // scoate code fences ```json ... ```
+  let s = raw.trim().replace(/^```(?:json)?/i, '').replace(/```$/,'').trim();
+  // inlocuieste ghilimele smart
+  s = s.replace(/[\u201C\u201D\u201E\u201F\u2033]/g, '"').replace(/[\u2018\u2019]/g, "'");
+  // taie eventual text inainte/dupa primul { ... } mare
+  const m = s.match(/\{[\s\S]*\}$/);
+  if (m) s = m[0];
+  return JSON.parse(s);
+}
+
 
 /* -------------------- Template helpers -------------------- */
 async function loadTemplate() {
