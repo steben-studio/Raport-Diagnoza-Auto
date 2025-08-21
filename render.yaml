@@ -2,16 +2,15 @@ services:
   - type: web
     name: raport-diagnoza-auto
     env: node
-    plan: free
     region: frankfurt
+    plan: free
     buildCommand: "npm ci"
     startCommand: "node index.js"
-    autoDeploy: true
     healthCheckPath: "/health"
     envVars:
       - key: NODE_VERSION
         value: 20
-      # ---- IMAP (citire) ----
+      # IMAP
       - key: IMAP_HOST
         value: imap.gmail.com
       - key: IMAP_PORT
@@ -20,29 +19,41 @@ services:
         value: "true"
       - key: MAILBOX
         value: INBOX
-      # ---- SMTP (trimitere) ----
+      # SMTP
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT
         value: "465"
       - key: SMTP_SECURE
         value: "true"
-      # ---- LLM ----
+      # OPENAI (setezi in dashboard)
       - key: OPENAI_API_KEY
         sync: false
-      # ---- Destinatar raport ----
+      # Destinatar
       - key: MAIL_TO
         sync: false
-      # ---- Poll ----
+      # Polling
       - key: POLL_SECONDS
         value: "120"
-      # ---- Template & Assets ----
+      # Template & Assets
       - key: TEMPLATE_URL
         value: "https://stebenstudio.com/Raport-Diagnoza-Auto.html"
       - key: ASSETS_BASE_URL
         value: "https://stebenstudio.com"
       - key: INLINE_CSS
         value: "true"
-      # Optional explicit:
-      # - key: CSS_URL
-      #   value: "https://stebenstudio.com/assets/css/style.css"
+      - key: CSS_URL
+        value: "https://stebenstudio.com/assets/css/style.css"
+      # SFTP (Hostinger)
+      - key: SFTP_HOST
+        sync: false
+      - key: SFTP_PORT
+        value: "22"
+      - key: SFTP_USER
+        sync: false
+      - key: SFTP_PASS
+        sync: false
+      - key: SFTP_BASEDIR
+        value: "/public_html/reports"
+      - key: PUBLIC_BASE_URL
+        value: "https://stebenstudio.com/reports"
