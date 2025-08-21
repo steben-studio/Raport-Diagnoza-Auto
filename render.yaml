@@ -2,75 +2,47 @@ services:
   - type: web
     name: raport-diagnoza-auto
     env: node
+    plan: free
+    region: frankfurt
+    buildCommand: "npm ci"
+    startCommand: "node index.js"
     autoDeploy: true
-
-    buildCommand: yarn
-    startCommand: node index.js
-
-    # Render va verifica acest endpoint ca sa considere serviciul "up"
-    healthCheckPath: /health
-    healthCheckTimeout: 100
-
+    healthCheckPath: "/health"
     envVars:
       - key: NODE_VERSION
-        value: 22.16.0
-
-      # --- IMAP (Gmail)
+        value: 20
+      # ---- IMAP (citire) ----
       - key: IMAP_HOST
         value: imap.gmail.com
       - key: IMAP_PORT
         value: "993"
       - key: IMAP_SECURE
         value: "true"
-      - key: IMAP_USER
-        sync: false
-      - key: IMAP_PASS
-        sync: false
-
-      # --- Polling
       - key: MAILBOX
         value: INBOX
-      - key: SEARCH_QUERY
-        value: "UNSEEN"
-      - key: POLL_INTERVAL_MS
-        value: "120000"
-
-      # --- PDF / Template
-      - key: REPORT_TEMPLATE
-        value: vw_cv_2016
-      - key: REMOVE_DIACRITICS
-        value: "true"
-      - key: SITE_LOCALE
-        value: ro-RO
-
-      # --- SMTP (trimitere raport pe email - optional)
+      # ---- SMTP (trimitere) ----
       - key: SMTP_HOST
         value: smtp.gmail.com
       - key: SMTP_PORT
         value: "465"
       - key: SMTP_SECURE
         value: "true"
-      - key: SMTP_USER
-        sync: false
-      - key: SMTP_PASS
-        sync: false
-
-      # --- OpenAI (daca folosesti sumarizare/explicatii)
+      # ---- LLM ----
       - key: OPENAI_API_KEY
         sync: false
-
-      # --- Upload extern (optional: S3 / R2)
-      - key: STORAGE_PROVIDER
-        value: s3
-      - key: S3_ENDPOINT
+      # ---- Destinatar raport ----
+      - key: MAIL_TO
         sync: false
-      - key: S3_BUCKET
-        sync: false
-      - key: S3_REGION
-        value: auto
-      - key: S3_ACCESS_KEY_ID
-        sync: false
-      - key: S3_SECRET_ACCESS_KEY
-        sync: false
-      - key: S3_PUBLIC_BASE
-        sync: false
+      # ---- Poll ----
+      - key: POLL_SECONDS
+        value: "120"
+      # ---- Template & Assets ----
+      - key: TEMPLATE_URL
+        value: "https://stebenstudio.com/Raport-Diagnoza-Auto.html"
+      - key: ASSETS_BASE_URL
+        value: "https://stebenstudio.com"
+      - key: INLINE_CSS
+        value: "true"
+      # Optional explicit:
+      # - key: CSS_URL
+      #   value: "https://stebenstudio.com/assets/css/style.css"
