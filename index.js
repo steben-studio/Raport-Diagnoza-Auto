@@ -9,11 +9,12 @@ import path from 'path';
 import nodemailer from 'nodemailer';
 import OpenAI from 'openai';
 import { fileURLToPath } from 'url';
+import SftpClient from 'ssh2-sftp-client'; // <— pentru upload pe Hostinger
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-/* -------------------- Config & HTTP health -------------------- */
+/* -------------------- HTTP health -------------------- */
 const PORT = Number(process.env.PORT || 10000);
 http.createServer((req, res) => {
   if (req.url === '/health') { res.writeHead(200); res.end('ok'); return; }
@@ -22,9 +23,10 @@ http.createServer((req, res) => {
 
 const POLL_MS = Math.max(60, Number(process.env.POLL_SECONDS) || 120) * 1000;
 
+/* -------------------- OpenAI -------------------- */
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* -------------------- IMAP / SMTP defaults -------------------- */
+/* -------------------- IMAP / SMTP -------------------- */
 const IMAPHOST = process.env.IMAP_HOST || 'imap.gmail.com';
 const IMAPPORT = Number(process.env.IMAP_PORT || 993);
 const IMAPSEC  = String(process.env.IMAP_SECURE ?? 'true').toLowerCase() !== 'false';
@@ -36,11 +38,21 @@ const SMTPSEC  = String(process.env.SMTP_SECURE ?? 'true').toLowerCase() !== 'fa
 const MAILBOX  = process.env.MAILBOX || 'INBOX';
 const MAIL_TO  = (process.env.MAIL_TO || process.env.SMTP_USER || '').trim();
 
-/* -------------------- Template / Assets -------------------- */
-const TEMPLATE_URL = process.env.TEMPLATE_URL || ''; // ex: https://stebenstudio.com/Raport-Diagnoza-Auto.html
-const ASSETS_BASE  = (process.env.ASSETS_BASE_URL || '').replace(/\/+$/,''); // ex: https://stebenstudio.com
+/* -------------------- Template & Assets -------------------- */
+const TEMPLATE_URL = process.env.TEMPLATE_URL || 'https://stebenstudio.com/Raport-Diagnoza-Auto.html';
+const ASSETS_BASE  = (process.env.ASSETS_BASE_URL || 'https://stebenstudio.com').replace(/\/+$/,'');
 const INLINE_CSS   = String(process.env.INLINE_CSS ?? 'true').toLowerCase() !== 'false';
-const CSS_URL      = process.env.CSS_URL || (ASSETS_BASE ? `${ASSETS_BASE}/assets/css/style.css` : '');
+const CSS_URL      = process.env.CSS_URL || `${ASSETS_BASE}/assets/css/style.css`;
+
+/* -------------------- SFTP (Hostinger) -------------------- */
+const SFTP = {
+  host: process.env.SFTP_HOST,                 // ex: ftp.tudomeniu.ro
+  port: Number(process.env.SFTP_PORT || 22),
+  username: process.env.SFTP_USER,
+  password: process.env.SFTP_PASS,
+  baseDir: (process.env.SFTP_BASEDIR || '/public_html/reports').replace(/\/+$/,''), // unde urcam .html
+  publicBaseUrl: (process.env.PUBLIC_BASE_URL || 'https://stebenstudio.com/reports').replace(/\/+$/,'')
+};
 
 /* -------------------- IMAP client -------------------- */
 const imap = new ImapFlow({
@@ -77,10 +89,9 @@ async function checkInbox() {
       const from = (mail.from?.text||'').toLowerCase();
       const subj = (mail.subject||'').toLowerCase();
 
-      // filtreaza mesajele relevante TOPDON
+      // filtre: email/topdon sau subiect raport
       if (!from.includes('report-noreply@topdondiagnostics.com') &&
           !subj.includes('raport de diagnosticare') &&
-          !subj.includes('diagnostic report') &&
           !/topdon/i.test(from)) {
         continue;
       }
@@ -98,8 +109,8 @@ async function checkInbox() {
       if (!report) { console.log('⚠️ nu am putut prelua raportul'); continue; }
 
       const analysis = await analyzeWithGPT(report);
-      const { outHtml, htmlString } = await renderReport(report, analysis);
-      await emailReport({ outHtml, htmlString });
+      const { htmlPublicUrl, filename } = await renderAndUpload(report, analysis); // <-- upload SFTP
+      await emailReport(htmlPublicUrl, filename);
 
       await imap.messageFlagsAdd({uid:msg.uid}, ['\\Seen']);
     }
@@ -113,7 +124,7 @@ function extractTopdonLink(htmlOrText) {
   return m ? m[0] : null;
 }
 
-/* -------------------- Fetch + parse raport TOPDON -------------------- */
+/* -------------------- Fetch + PARSE raport -------------------- */
 async function fetchTopdonReport(url) {
   const res = await fetch(url, { redirect:'follow' });
   if (!res.ok) return null;
@@ -122,44 +133,41 @@ async function fetchTopdonReport(url) {
   const text = $('body').text().replace(/\s+/g,' ').trim();
 
   const pick = (re) => (text.match(re)||[])[1] || null;
-  const time    = pick(/Time:\s*([0-9/:\-\s]+)/i);
-  const sn      = pick(/SN:\s*([A-Z0-9]+)/i);
-  const make    = pick(/Make:\s*([A-Za-z0-9]+)/i);
+  const make    = pick(/Make:\s*([A-Za-z0-9\/\-\s]+)/i);
   const model   = pick(/Model:\s*([A-Za-z0-9\/\-\s]+)/i);
   const vin     = pick(/VIN:\s*([A-HJ-NPR-Z0-9]{17})/i);
   const mileage = pick(/Mileage:\s*([0-9.,]+\s*(?:km|mi))/i);
 
   const dtcs = [];
 
-  // PASS 1 — pattern TOPDON: MODUL HEXCODE descriere STATUS
-  const chunks = text.split(/(?=\s+[A-ZĂÂÎȘȚ]{3,}\s+[0-9A-F]{4,6}\s+)/g);
-  for (const b of chunks) {
-    const m = b.match(/([A-ZĂÂÎȘȚ]{3,})\s+([0-9A-F]{4,6})\s+([^]+?)(Memorie|Memor(?:y|ie)|Permanent|Intermitent|F[aă]r[aă]\s*status)/i);
-    if (m) {
-      dtcs.push({
-        modul: m[1].normalize('NFC'),
-        cod: m[2],
-        descriere_bruta: m[3].replace(/\s+/g,' ').replace(/\s*,\s*/g, ', ').trim(),
-        status: m[4]
-      });
-    }
+  // PASS 1 – tip "System  CODE  desc  Status" (ca in raportul tau)
+  // Exemplu: "ECM (Engine Control Module - DME/DDE) 480A DDE: Particulate-Filter System Current"
+  const reSys = /([A-Z]{2,}(?:\s*\([^)]+\))?)\s+([A-Z0-9]{3,5})\s+([^]+?)(?=\s(?:History|Current|Intermitent|Permanent)\b)/gi;
+  let m;
+  while ((m = reSys.exec(text)) !== null) {
+    dtcs.push({
+      modul: m[1].replace(/\s+/g, ' ').trim(),
+      cod: m[2],
+      descriere_bruta: m[3].replace(/\s+/g,' ').trim(),
+      status: 'Nespecificat'
+    });
   }
 
-  // PASS 2 — coduri OBD generice (P/B/C/U + 4 cifre)
+  // PASS 2 – coduri OBD generice P/B/C/U
   if (dtcs.length === 0) {
-    const re = /\b([PBCU]\d{4})\b[:\-\s]*([A-Za-z0-9 ,.'()\/\-\+]+?)(?:Status|Memor(?:y|ie)|Permanent|Intermitent|$)/gi;
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      dtcs.push({ modul: 'ECU', cod: m[1], descriere_bruta: (m[2]||'').trim(), status: 'Nespecificat' });
+    const reObd = /\b([PBCU]\d{4})\b[:\-\s]*([A-Za-z0-9 ,.'()\/\-\+]+?)(?=\s(?:Status|Memor(?:y|ie)|Permanent|Intermitent|$))/gi;
+    let n;
+    while ((n = reObd.exec(text)) !== null) {
+      dtcs.push({ modul: 'ECU', cod: n[1], descriere_bruta: (n[2]||'').trim(), status: 'Nespecificat' });
     }
   }
 
-  // PASS 3 — fallback tabele
+  // PASS 3 – fallback tabele din pagina
   if (dtcs.length === 0) {
     $('table tr').each((_, tr) => {
       const tds = $(tr).find('td,th').map((__, el) => $(el).text().trim()).get();
       if (tds.length >= 2) {
-        const maybeCode = tds.find(x => /^[PBCU]\d{4}$/.test(x) || /^[0-9A-F]{4,6}$/.test(x));
+        const maybeCode = tds.find(x => /^[PBCU]\d{4}$/.test(x) || /^[0-9A-Z]{3,6}$/.test(x));
         if (maybeCode) {
           dtcs.push({
             modul: tds[0] || 'ECU',
@@ -172,7 +180,7 @@ async function fetchTopdonReport(url) {
     });
   }
 
-  return { url, time, sn, make, model, vin, mileage, dtcs };
+  return { url, make, model, vin, mileage, dtcs };
 }
 
 /* -------------------- GPT analiza → JSON fara diacritice -------------------- */
@@ -208,58 +216,49 @@ Reguli: 2-4 propozitii per camp; nu inventa date lipsa; concis si practic; fara 
   try { data = JSON.parse(resp.choices[0].message.content); }
   catch { throw new Error('LLM a returnat non-JSON'); }
 
-  // completeaza meta lipsa
+  // completeaza meta lipsa + fallback daca nu exista DTC
   data.vehicul = data.vehicul || {};
-  data.vehicul.brand       = data.vehicul.brand || report.make || null;
-  data.vehicul.model       = data.vehicul.model || report.model || null;
-  data.vehicul.kilometraj  = data.vehicul.kilometraj || report.mileage || null;
+  data.vehicul.brand = data.vehicul.brand || report.make || null;
+  data.vehicul.model = data.vehicul.model || report.model || null;
+  data.vehicul.kilometraj = data.vehicul.kilometraj || report.mileage || null;
   data.vehicul.data_scanarii = data.vehicul.data_scanarii || new Date().toISOString().slice(0,10);
 
-  // fallback clar cand nu exista DTC
   if (!data.pas_1_erori_initiale || data.pas_1_erori_initiale.length === 0) {
-    data.concluzie = data.concluzie || 'Raportul TOPDON nu contine coduri DTC sau exportul a fost incomplet. Recomand rescanare completa cu tensiune stabila si salvarea datelor de freeze frame.';
+    data.concluzie = data.concluzie || 'Raportul TOPDON nu a furnizat DTC-uri detaliate. Recomand rescanare completa cu tensiune stabila si export complet cu freeze frame.';
     data.todo = data.todo?.length ? data.todo : [
-      { nr: '1', text: 'Efectueaza un Auto-Scan complet pe toate modulele cu redresor conectat (12-14.5V).' },
-      { nr: '2', text: 'Daca apar coduri, exporta raportul detaliat cu denumirea ECU, codul, descrierea si freeze frame.' },
-      { nr: '3', text: 'Daca nu apar coduri, verifica alimentarea OBD-II si liniile CAN/K-Line.' },
+      { nr: '1', text: 'Fa un Auto-Scan pe toate modulele cu redresor 12–14.5V.' },
+      { nr: '2', text: 'Daca apar coduri, exporta raportul detaliat cu ECU, cod, descriere si freeze frame.' },
+      { nr: '3', text: 'Daca nu apar DTC, verifica alimentarea OBD-II si liniile CAN/K-Line.' }
     ];
   }
 
   return data;
 }
 
-/* -------------------- Render raport (folosind HTML-ul tau) -------------------- */
+/* -------------------- Template helpers -------------------- */
 async function loadTemplate() {
-  if (TEMPLATE_URL) {
-    try {
-      const r = await fetch(TEMPLATE_URL, { redirect: 'follow' });
-      if (r.ok) return await r.text();
-      console.warn('[tpl] TEMPLATE_URL fetch failed:', r.status);
-    } catch (e) {
-      console.warn('[tpl] TEMPLATE_URL error:', e.message);
-    }
+  try {
+    const r = await fetch(TEMPLATE_URL, { redirect: 'follow' });
+    if (r.ok) return await r.text();
+    console.warn('[tpl] TEMPLATE_URL fetch failed:', r.status);
+  } catch (e) {
+    console.warn('[tpl] TEMPLATE_URL error:', e.message);
   }
-  // fallback local
-  const tplPath = path.join(__dirname, 'Raport-Diagnoza-Auto.html');
-  return fs.readFile(tplPath, 'utf8');
+  // fallback local (din repo)
+  const localTpl = path.join(__dirname, 'Raport-Diagnoza-Auto.html');
+  return fs.readFile(localTpl, 'utf8');
 }
 
 function absolutizeAssets(html) {
-  if (!ASSETS_BASE) return html;
-  return html
-    .replace(/(src|href)=["'](?:\.\/)?assets\//gi, `$1="${ASSETS_BASE}/assets/`);
+  return html.replace(/(src|href)=["'](?:\.\/)?assets\//gi, `$1="${ASSETS_BASE}/assets/`);
 }
 
 async function inlineCss(html) {
   if (!INLINE_CSS) return html;
-  const cssUrl = CSS_URL;
-  if (!cssUrl) return html;
-
   try {
-    const r = await fetch(cssUrl, { redirect: 'follow' });
+    const r = await fetch(CSS_URL, { redirect: 'follow' });
     if (!r.ok) return html;
     const css = await r.text();
-    // inlocuieste <link ...assets/css/style.css> cu <style>...</style>
     html = html.replace(
       /<link[^>]+href=["'][^"']*assets\/css\/style\.css["'][^>]*>/i,
       `<style>${css}</style>`
@@ -267,7 +266,7 @@ async function inlineCss(html) {
   } catch (e) {
     console.warn('[css] inline failed:', e.message);
   }
-  // <script> oricum e ignorat in email; il putem elimina pt curatenie
+  // JS oricum e ignorat in email – il scoatem
   html = html.replace(/<script[\s\S]*?<\/script>/gi, '');
   return html;
 }
@@ -297,7 +296,8 @@ function fillLoop(html, token, rows, tbodyId) {
 
 function safe(v){ return (v ?? '').toString(); }
 
-async function renderReport(report, data) {
+/* -------------------- Render + UPLOAD -------------------- */
+async function renderAndUpload(report, data) {
   let html = await loadTemplate();
   html = absolutizeAssets(html);
 
@@ -332,19 +332,46 @@ async function renderReport(report, data) {
   // curata separatorul de la ultima linie
   html = html.replace('<!--__LASTROW__-->\n<tr class="row-sep"><td colspan="4"></td></tr>', '');
 
-  // pentru e‑mail: CSS inline
-  const htmlForEmail = await inlineCss(html);
+  // versiune pentru email (CSS inline)
+  const htmlEmail = await inlineCss(html);
 
+  // salvare local + upload SFTP
   const outDir = path.join(__dirname, 'out');
   await fs.mkdir(outDir, { recursive: true });
-  const outHtml = path.join(outDir, `Raport_${safe(report.vin)||'FARA_VIN'}.html`);
+  const random = Math.random().toString(36).slice(2, 10);
+  const filename = `Raport_${safe(report.vin)||'FARA_VIN'}_${random}.html`;
+  const outHtml = path.join(outDir, filename);
   await fs.writeFile(outHtml, html, 'utf8');
 
-  return { outHtml, htmlString: htmlForEmail };
+  const url = await uploadViaSftp(outHtml, filename); // public URL
+  return { htmlPublicUrl: url, filename, htmlEmail };
 }
 
-/* -------------------- Send email (HTML only) -------------------- */
-async function emailReport(files) {
+async function uploadViaSftp(localPath, filename) {
+  if (!SFTP.host || !SFTP.username || !SFTP.password || !SFTP.baseDir || !SFTP.publicBaseUrl) {
+    console.warn('[sftp] configuratie incompleta – skip upload, folosesc fisier local');
+    return `file://${localPath}`;
+  }
+  const sftp = new SftpClient();
+  try {
+    await sftp.connect({
+      host: SFTP.host, port: SFTP.port,
+      username: SFTP.username, password: SFTP.password
+    });
+    // asigura director
+    try { await sftp.mkdir(SFTP.baseDir, true); } catch {}
+    const remotePath = `${SFTP.baseDir}/${filename}`;
+    await sftp.fastPut(localPath, remotePath);
+    const publicUrl = `${SFTP.publicBaseUrl}/${filename}`;
+    console.log('[sftp] uploaded:', publicUrl);
+    return publicUrl;
+  } finally {
+    sftp.end().catch(()=>{});
+  }
+}
+
+/* -------------------- Email -------------------- */
+async function emailReport(htmlPublicUrl, filename) {
   const t = nodemailer.createTransport({
     host: SMTPHOST,
     port: SMTPPORT,
@@ -352,17 +379,22 @@ async function emailReport(files) {
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
   });
 
+  const htmlBody = `
+    <p>Buna,</p>
+    <p>Am generat raportul auto. Il poti deschide aici:</p>
+    <p><a href="${htmlPublicUrl}" target="_blank">${htmlPublicUrl}</a></p>
+    <p>Daca ai nevoie de PDF, il putem genera la cerere.</p>
+  `;
+
   await t.sendMail({
     from: process.env.SMTP_USER,
     to: MAIL_TO || process.env.SMTP_USER,
-    subject: 'Raport Diagnoza Auto (HTML)',
-    text: 'Gasesti raportul in corpul emailului si atasat ca .html',
-    html: files.htmlString,
-    attachments: [
-      { filename: path.basename(files.outHtml), path: files.outHtml }
-    ]
+    subject: 'Raport Diagnoza Auto – link HTML',
+    text: `Raport disponibil la: ${htmlPublicUrl}`,
+    html: htmlBody,
+    attachments: [] // nu mai atasam fisierul, ai linkul public
   });
-  console.log('✅ Email trimis:', MAIL_TO || process.env.SMTP_USER);
+  console.log('✅ Email trimis catre:', MAIL_TO || process.env.SMTP_USER, '->', htmlPublicUrl);
 }
 
 main().catch(e => { console.error(e); process.exitCode = 1; });
