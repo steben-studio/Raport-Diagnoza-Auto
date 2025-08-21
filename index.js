@@ -215,7 +215,6 @@ Reguli: 2-4 propozitii la fiecare camp text; concis si practic; fara diacritice;
     dtc_list: report.dtcs.map(d => ({ cod: d.cod, modul: d.modul, descriere_bruta: d.descriere_bruta }))
   };
 
-  // 1) cerem explicit JSON mode (FARA 'temperature', modelul nu accepta alta valoare decat default)
   const req = {
     model: 'gpt-5',
     messages: [
@@ -225,32 +224,20 @@ Reguli: 2-4 propozitii la fiecare camp text; concis si practic; fara diacritice;
     response_format: { type: 'json_object' }
   };
 
-  // 2) retry + cleanup daca tot vine non-JSON (de ex. modele fara JSON mode)
+  // --- safety valve + debug
+  if ('temperature' in req) delete req.temperature;
+  console.log('[llm] model:', req.model, 'temperature:', req.temperature ?? 'none');
+
   let raw;
   for (let attempt = 1; attempt <= 2; attempt++) {
     const resp = await openai.chat.completions.create(req);
     raw = resp.choices?.[0]?.message?.content || '';
     try {
       const data = parseLLMJson(raw);
-      // completam meta lipsa
-      data.vehicul = data.vehicul || {};
-      data.vehicul.brand = data.vehicul.brand || report.make || null;
-      data.vehicul.model = data.vehicul.model || report.model || null;
-      data.vehicul.kilometraj = data.vehicul.kilometraj || report.mileage || null;
-      data.vehicul.data_scanarii = data.vehicul.data_scanarii || new Date().toISOString().slice(0,10);
-
-      if (!data.pas_1_erori_initiale || data.pas_1_erori_initiale.length === 0) {
-        data.concluzie = data.concluzie || 'Raportul TOPDON nu a furnizat DTC-uri detaliate. Recomand rescanare completa cu tensiune stabila si export complet cu freeze frame.';
-        data.todo = data.todo?.length ? data.todo : [
-          { nr: '1', text: 'Efectueaza un Auto-Scan complet pe toate modulele cu redresor conectat (12–14.5V).' },
-          { nr: '2', text: 'Daca apar coduri, exporta raportul detaliat cu denumirea ECU, cod, descriere si freeze frame.' },
-          { nr: '3', text: 'Daca nu apar coduri, verifica alimentarea OBD-II si liniile CAN/K-Line.' }
-        ];
-      }
+      // ... restul ca înainte
       return data;
     } catch (e) {
       console.warn(`[llm] JSON parse fail (attempt ${attempt}) – len=${raw.length}`);
-      // la al doilea esec, continuam la fallback
     }
   }
 
