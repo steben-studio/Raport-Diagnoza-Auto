@@ -54,28 +54,36 @@ const SFTP = {
   publicBaseUrl: (process.env.PUBLIC_BASE_URL || 'https://stebenstudio.com/reports').replace(/\/+$/,'')
 };
 
-/* -------------------- IMAP client -------------------- */
-const imap = new ImapFlow({
-  host: IMAPHOST,
-  port: IMAPPORT,
-  secure: IMAPSEC,
-  auth: { user: process.env.IMAP_USER, pass: process.env.IMAP_PASS },
-  logger: false
-});
-imap.on('error', (err) => console.error('[imap] error:', err));
-imap.on('close', async () => {
-  console.warn('[imap] closed. Reconnecting in 5s...');
-  setTimeout(async () => {
-    try { await imap.connect(); await imap.mailboxOpen(MAILBOX); console.log('[imap] reconnected'); }
-    catch (e) { console.error('[imap] reconnect failed:', e); }
-  }, 5000);
-});
+/* -------------------- IMAP client (factory cu reconectare corecta) -------------------- */
+let imap; // instanta curenta
 
-/* -------------------- Main -------------------- */
-async function main() {
+function attachImapHandlers(client) {
+  client.on('error', (err) => console.error('[imap] error:', err));
+  client.on('close', () => {
+    console.warn('[imap] closed. Reconnecting in 5s...');
+    setTimeout(() => initImap().catch(e => console.error('[imap] reconnect failed:', e)), 5000);
+  });
+}
+
+async function initImap() {
+  // inchide politicos vechea instanta, daca exista
+  try { if (imap) await imap.logout().catch(()=>{}); } catch {}
+  imap = new ImapFlow({
+    host: IMAPHOST,
+    port: IMAPPORT,
+    secure: IMAPSEC,
+    auth: { user: process.env.IMAP_USER, pass: process.env.IMAP_PASS },
+    logger: false
+  });
+  attachImapHandlers(imap);
   await imap.connect();
   await imap.mailboxOpen(MAILBOX);
   console.log('[imap] connected; polling each', POLL_MS/1000, 'sec');
+}
+
+/* -------------------- Main -------------------- */
+async function main() {
+  await initImap();
   await checkInbox();
   setInterval(checkInbox, POLL_MS);
 }
@@ -85,6 +93,9 @@ async function checkInbox() {
   const lock = await imap.getMailboxLock(MAILBOX);
   try {
     for await (const msg of imap.fetch({ seen: false }, { uid: true, source: true })) {
+      // marcheaza devreme ca vazut, ca sa nu re-procesezi daca procesul cade intre timp
+      await imap.messageFlagsAdd({ uid: msg.uid }, ['\\Seen']);
+
       const mail = await simpleParser(msg.source);
       const from = (mail.from?.text||'').toLowerCase();
       const subj = (mail.subject||'').toLowerCase();
@@ -99,8 +110,7 @@ async function checkInbox() {
       const body = (mail.html || mail.text || '');
       const link = extractTopdonLink(body);
       if (!link) {
-        console.log('⏭️  email TOPDON fara link -> mark seen');
-        await imap.messageFlagsAdd({uid:msg.uid}, ['\\Seen']);
+        console.log('⏭️  email TOPDON fara link -> skip');
         continue;
       }
 
@@ -111,8 +121,6 @@ async function checkInbox() {
       const analysis = await analyzeWithGPT(report);
       const { htmlPublicUrl, filename } = await renderAndUpload(report, analysis); // <-- upload SFTP
       await emailReport(htmlPublicUrl, filename);
-
-      await imap.messageFlagsAdd({uid:msg.uid}, ['\\Seen']);
     }
   } catch (e) {
     console.error('Eroare la checkInbox:', e);
@@ -126,7 +134,10 @@ function extractTopdonLink(htmlOrText) {
 
 /* -------------------- Fetch + PARSE raport -------------------- */
 async function fetchTopdonReport(url) {
-  const res = await fetch(url, { redirect:'follow' });
+  const res = await fetch(url, {
+    redirect:'follow',
+    headers: { 'user-agent': 'Mozilla/5.0 (DiagBot/1.0; +stebenstudio.com)' }
+  });
   if (!res.ok) return null;
   const html = await res.text();
   const $ = load(html);
@@ -140,8 +151,7 @@ async function fetchTopdonReport(url) {
 
   const dtcs = [];
 
-  // PASS 1 – tip "System  CODE  desc  Status" (ca in raportul tau)
-  // Exemplu: "ECM (Engine Control Module - DME/DDE) 480A DDE: Particulate-Filter System Current"
+  // PASS 1 – tip "System  CODE  desc  Status"
   const reSys = /([A-Z]{2,}(?:\s*\([^)]+\))?)\s+([A-Z0-9]{3,5})\s+([^]+?)(?=\s(?:History|Current|Intermitent|Permanent)\b)/gi;
   let m;
   while ((m = reSys.exec(text)) !== null) {
@@ -205,15 +215,13 @@ Reguli: 2-4 propozitii la fiecare camp text; concis si practic; fara diacritice;
     dtc_list: report.dtcs.map(d => ({ cod: d.cod, modul: d.modul, descriere_bruta: d.descriere_bruta }))
   };
 
-  // 1) cerem explicit JSON mode
+  // 1) cerem explicit JSON mode (FARA 'temperature', modelul nu accepta alta valoare decat default)
   const req = {
     model: 'gpt-5',
     messages: [
       { role: 'system', content: sys },
       { role: 'user', content: JSON.stringify(userPayload) }
     ],
-    temperature: 0.2,
-    // JSON Mode – raspuns valid JSON, fara text adiacent
     response_format: { type: 'json_object' }
   };
 
@@ -383,7 +391,7 @@ async function renderAndUpload(report, data) {
   // curata separatorul de la ultima linie
   html = html.replace('<!--__LASTROW__-->\n<tr class="row-sep"><td colspan="4"></td></tr>', '');
 
-  // versiune pentru email (CSS inline)
+  // versiune pentru email (CSS inline) – pastram pentru viitor, dar nu o folosim acum
   const htmlEmail = await inlineCss(html);
 
   // salvare local + upload SFTP
@@ -412,6 +420,7 @@ async function uploadViaSftp(localPath, filename) {
     // asigura director
     try { await sftp.mkdir(SFTP.baseDir, true); } catch {}
     const remotePath = `${SFTP.baseDir}/${filename}`;
+    console.log(`[sftp] uploading ${filename} -> ${SFTP.baseDir}`);
     await sftp.fastPut(localPath, remotePath);
     const publicUrl = `${SFTP.publicBaseUrl}/${filename}`;
     console.log('[sftp] uploaded:', publicUrl);
